@@ -2,22 +2,72 @@ import { NextRequest, NextResponse } from 'next/server'
 
 const WSDL_URL = 'https://ws.chronopost.fr/tracking-cxf/TrackingServiceWS?wsdl'
 
+/**
+ * Formate une date au format JJ/MM/AAAA HH:MM en heure de Paris
+ */
+function formatDateToParis(dateString: string | undefined, timeString?: string | undefined): string | undefined {
+  if (!dateString) return undefined
+
+  try {
+    // Parse la date - peut être au format ISO, YYYY-MM-DD, ou autre
+    let date: Date
+    
+    // Si on a une date et une heure séparées
+    if (timeString) {
+      const combined = `${dateString} ${timeString}`
+      date = new Date(combined)
+    } else {
+      date = new Date(dateString)
+    }
+
+    // Vérifie si la date est valide
+    if (isNaN(date.getTime())) {
+      return undefined
+    }
+
+    // Utilise Intl.DateTimeFormat pour formater en heure de Paris
+    const formatter = new Intl.DateTimeFormat('fr-FR', {
+      timeZone: 'Europe/Paris',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    })
+
+    const parts = formatter.formatToParts(date)
+    const day = parts.find(p => p.type === 'day')?.value || ''
+    const month = parts.find(p => p.type === 'month')?.value || ''
+    const year = parts.find(p => p.type === 'year')?.value || ''
+    const hour = parts.find(p => p.type === 'hour')?.value || ''
+    const minute = parts.find(p => p.type === 'minute')?.value || ''
+
+    return `${day}/${month}/${year} ${hour}:${minute}`
+  } catch (error) {
+    return undefined
+  }
+}
+
 interface TrackingRequest {
   skybillNumber: string
 }
 
 interface ChronopostResponse {
   status: string
-  statusCode?: string
-  statusMessage?: string
+  code?: string
   date?: string
   name?: string
+  statusCode?: string
+  statusMessage?: string
+  error?: string | number
   deliveryDetails?: {
     deliveryDate?: string
     deliveryTime?: string
     recipientName?: string
     recipientAddress?: string
     signature?: string
+    errorCode?: number
     [key: string]: any
   }
   events?: Array<{
@@ -28,7 +78,6 @@ interface ChronopostResponse {
     officeLabel?: string
     [key: string]: any
   }>
-  error?: string
 }
 
 /**
@@ -148,11 +197,19 @@ function parseChronopostResponse(result: any): ChronopostResponse {
   let statusMessage: string | undefined
   let date: string | undefined
   let name: string | undefined
+  let code: string | undefined
+  let error: string | number | undefined
 
-  // Trouve le dernier événement (le plus récent) pour le status
+  // Extrait errorCode de deliveryDetails
+  const errorCode = data.errorCode || (typeof data === 'object' && 'errorCode' in data ? (data as any).errorCode : undefined)
+  const errorCodeNum = typeof errorCode === 'number' ? errorCode : (typeof errorCode === 'string' ? parseInt(errorCode, 10) : 0)
+
+  // Trouve le dernier événement (le plus récent) pour le status et la date
+  let lastEventCode: string | undefined
   if (events.length > 0) {
     const lastEvent = events[events.length - 1]
     const eventCode = lastEvent.code || lastEvent.eventCode
+    lastEventCode = eventCode ? String(eventCode) : undefined
     const eventLabel = lastEvent.eventLabel || lastEvent.label || lastEvent.statusLabel
 
     if (eventCode) {
@@ -166,21 +223,34 @@ function parseChronopostResponse(result: any): ChronopostResponse {
       status = mapStatusToFrench(eventCode)
       statusMessage = status
     }
+
+    // Extrait la date du dernier événement (événement en cours) - systématiquement
+    const eventDate = lastEvent.eventDate || lastEvent.date || lastEvent.deliveryDate
+    const eventTime = lastEvent.eventTime || lastEvent.time || lastEvent.deliveryTime
+    date = formatDateToParis(eventDate, eventTime)
   }
 
-  // Trouve l'événement avec code="D" pour extraire date et name
+  // Détermine la valeur du champ "code"
+  if (errorCodeNum > 0) {
+    code = 'EXCEPTION'
+  } else if (lastEventCode && (lastEventCode === 'D' || lastEventCode.toUpperCase() === 'D')) {
+    code = 'DELIVERED'
+  } else {
+    code = 'INPROGRESS'
+  }
+
+  // Extrait l'erreur si errorCode > 0
+  if (errorCodeNum > 0) {
+    error = errorCodeNum
+  }
+
+  // Trouve l'événement avec code="D" pour extraire name (la date vient toujours du dernier événement)
   const deliveredEvent = events.find((event: any) => {
     const code = event.code || event.eventCode
     return code === 'D' || String(code).toUpperCase() === 'D'
   })
 
   if (deliveredEvent) {
-    // Ajoute date à la racine si code="D"
-    const deliveryDate = deliveredEvent.eventDate || deliveredEvent.date || deliveredEvent.deliveryDate
-    if (deliveryDate) {
-      date = deliveryDate
-    }
-
     // Ajoute name à la racine depuis infoCompList de l'événement avec code="D"
     if (deliveredEvent.infoCompList && Array.isArray(deliveredEvent.infoCompList)) {
       // Cherche l'élément avec name="Nom du réceptionnaire" ou similaire
@@ -217,10 +287,12 @@ function parseChronopostResponse(result: any): ChronopostResponse {
   // Construit la réponse dans l'ordre souhaité
   const response: ChronopostResponse = {
     status,
+    code,
+    date: date || undefined, // Date systématiquement ajoutée si disponible
+    ...(name && { name }),
     ...(statusCode && { statusCode }),
     ...(statusMessage && { statusMessage }),
-    ...(date && { date }),
-    ...(name && { name }),
+    ...(error !== undefined && { error }),
     deliveryDetails: { ...data },
     ...(mappedEvents && { events: mappedEvents })
   }
