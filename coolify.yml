@@ -1,0 +1,12 @@
+# Configuration Coolify (optionnel)
+# Coolify détectera automatiquement le Dockerfile si présent
+
+# Port par défaut
+port: 3000
+
+# Build command (optionnel, Coolify utilisera le Dockerfile)
+# build_command: npm run build
+
+# Start command (optionnel, défini dans le Dockerfile)
+# start_command: npm start
+
